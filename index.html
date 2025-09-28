@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Medical AI - Breast Cancer Classification</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <div class="logo-icon">🏥</div>
+                    <span class="logo-text">Medical AI</span>
+                </div>
+                <nav class="nav">
+                    <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+                    <button class="nav-btn" data-tab="train">Train Model</button>
+                    <button class="nav-btn" data-tab="predict">Diagnosis</button>
+                    <button class="nav-btn" data-tab="data">Data Explorer</button>
+                </nav>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard Tab -->
+            <div class="tab-content active" id="dashboard">
+                <div class="page-header">
+                    <h1>Breast Cancer Classification Dashboard</h1>
+                    <p>AI-powered diagnostic assistance for medical professionals</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon accuracy">📊</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="modelAccuracy">--</div>
+                            <div class="stat-label">Model Accuracy</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon predictions">🔬</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="totalPredictions">0</div>
+                            <div class="stat-label">Predictions Made</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon dataset">📋</div>
+                        <div class="stat-content">
+                            <div class="stat-value">569</div>
+                            <div class="stat-label">Training Samples</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon features">🧪</div>
+                        <div class="stat-content">
+                            <div class="stat-value">30</div>
+                            <div class="stat-label">Features</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid">
+                    <div class="card">
+                        <h3>Model Status</h3>
+                        <div class="model-status" id="modelStatus">
+                            <div class="status-indicator not-trained"></div>
+                            <span>Model not trained</span>
+                        </div>
+                        <p class="status-description">Train the neural network to enable predictions</p>
+                    </div>
+
+                    <div class="card">
+                        <h3>Recent Activity</h3>
+                        <div class="activity-list" id="activityList">
+                            <div class="activity-item">
+                                <div class="activity-icon">ℹ️</div>
+                                <div class="activity-content">
+                                    <div class="activity-title">System Initialized</div>
+                                    <div class="activity-time">Ready for training</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3>Dataset Overview</h3>
+                        <div class="dataset-stats">
+                            <div class="dataset-item">
+                                <span class="dataset-label">Malignant cases:</span>
+                                <span class="dataset-value malignant">212 (37.3%)</span>
+                            </div>
+                            <div class="dataset-item">
+                                <span class="dataset-label">Benign cases:</span>
+                                <span class="dataset-value benign">357 (62.7%)</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Train Model Tab -->
+            <div class="tab-content" id="train">
+                <div class="page-header">
+                    <h1>Neural Network Training</h1>
+                    <p>Configure and train the classification model</p>
+                </div>
+
+                <div class="training-container">
+                    <div class="card training-config">
+                        <h3>Training Configuration</h3>
+                        <div class="config-grid">
+                            <div class="config-item">
+                                <label for="epochs">Epochs</label>
+                                <input type="number" id="epochs" value="20" min="5" max="100">
+                            </div>
+                            <div class="config-item">
+                                <label for="learningRate">Learning Rate</label>
+                                <input type="number" id="learningRate" value="0.001" step="0.0001" min="0.0001" max="0.01">
+                            </div>
+                            <div class="config-item">
+                                <label for="batchSize">Batch Size</label>
+                                <input type="number" id="batchSize" value="32" min="16" max="128">
+                            </div>
+                        </div>
+                        <button class="btn btn-primary" id="trainBtn">Start Training</button>
+                    </div>
+
+                    <div class="card training-progress">
+                        <h3>Training Progress</h3>
+                        <div class="progress-container">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="progressFill"></div>
+                            </div>
+                            <div class="progress-text">
+                                <span id="progressText">Ready to train</span>
+                                <span id="progressPercent">0%</span>
+                            </div>
+                        </div>
+                        <div class="metrics-grid">
+                            <div class="metric">
+                                <div class="metric-label">Loss</div>
+                                <div class="metric-value" id="currentLoss">--</div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-label">Accuracy</div>
+                                <div class="metric-value" id="currentAccuracy">--</div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-label">Epoch</div>
+                                <div class="metric-value" id="currentEpoch">0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card chart-container">
+                        <h3>Training Metrics</h3>
+                        <canvas id="trainingChart" width="400" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Prediction Tab -->
+            <div class="tab-content" id="predict">
+                <div class="page-header">
+                    <h1>Tumor Diagnosis</h1>
+                    <p>Enter patient measurements for AI-assisted diagnosis</p>
+                </div>
+
+                <div class="prediction-container">
+                    <div class="card input-form">
+                        <h3>Patient Measurements</h3>
+                        <div class="input-grid">
+                            <div class="input-group">
+                                <label for="radiusMean">Radius Mean</label>
+                                <input type="number" id="radiusMean" step="0.01" placeholder="17.99">
+                            </div>
+                            <div class="input-group">
+                                <label for="textureMean">Texture Mean</label>
+                                <input type="number" id="textureMean" step="0.01" placeholder="10.38">
+                            </div>
+                            <div class="input-group">
+                                <label for="perimeterMean">Perimeter Mean</label>
+                                <input type="number" id="perimeterMean" step="0.01" placeholder="122.80">
+                            </div>
+                            <div class="input-group">
+                                <label for="areaMean">Area Mean</label>
+                                <input type="number" id="areaMean" step="0.01" placeholder="1001.0">
+                            </div>
+                            <div class="input-group">
+                                <label for="smoothnessMean">Smoothness Mean</label>
+                                <input type="number" id="smoothnessMean" step="0.00001" placeholder="0.11840">
+                            </div>
+                            <div class="input-group">
+                                <label for="compactnessMean">Compactness Mean</label>
+                                <input type="number" id="compactnessMean" step="0.00001" placeholder="0.27760">
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary" id="loadSampleBtn">Load Sample Data</button>
+                        <button class="btn btn-primary" id="predictBtn" disabled>Analyze Tumor</button>
+                    </div>
+
+                    <div class="card prediction-result" id="predictionResult" style="display: none;">
+                        <h3>Diagnosis Result</h3>
+                        <div class="result-content">
+                            <div class="diagnosis-badge" id="diagnosisBadge"></div>
+                            <div class="confidence-container">
+                                <div class="confidence-label">Confidence Score</div>
+                                <div class="confidence-bar">
+                                    <div class="confidence-fill" id="confidenceFill"></div>
+                                </div>
+                                <div class="confidence-value" id="confidenceValue"></div>
+                            </div>
+                            <div class="disclaimer">
+                                <strong>Medical Disclaimer:</strong> This AI system is for educational purposes only. 
+                                Always consult with qualified medical professionals for actual diagnosis and treatment.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Data Explorer Tab -->
+            <div class="tab-content" id="data">
+                <div class="page-header">
+                    <h1>Dataset Explorer</h1>
+                    <p>Explore the Wisconsin Breast Cancer Dataset</p>
+                </div>
+
+                <div class="data-grid">
+                    <div class="card">
+                        <h3>Sample Data</h3>
+                        <div class="data-table-container">
+                            <table class="data-table" id="dataTable">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Diagnosis</th>
+                                        <th>Radius Mean</th>
+                                        <th>Texture Mean</th>
+                                        <th>Perimeter Mean</th>
+                                        <th>Area Mean</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="dataTableBody">
+                                    <!-- Data will be populated by JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3>Feature Distribution</h3>
+                        <div class="chart-container">
+                            <canvas id="featureChart" width="400" height="300"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Training model...</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest"></script>
+    <script src="app.js"></script>
+</body>
+</html>
