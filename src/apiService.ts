@@ -6,10 +6,55 @@ export interface PredictionResult {
   prediction_timestamp?: string;
 }
 
+// Define file upload response structure
+export interface FileUploadResult {
+  success: boolean;
+  message: string;
+  filename?: string;
+  columns?: string[];
+  sample_data?: any[];
+  total_rows?: number;
+}
+
 // Define error response structure
 interface ApiError {
   error: string;
   details?: any;
+}
+
+// Define dataset response structure
+export interface DatasetResponse {
+  data: Array<Record<string, any>>;
+  total_count: number;
+  feature_names: string[];
+  timestamp: string;
+}
+
+// Define model status response structure
+export interface ModelStatusResponse {
+  trained: boolean;
+  accuracy: number;
+  total_samples: number;
+  feature_count: number;
+  feature_names?: string[];
+  timestamp: string;
+}
+
+// Define training response structure
+export interface TrainingResponse {
+  status: string;
+  new_accuracy: number;
+  samples_used: number;
+  timestamp: string;
+}
+
+// Define health check response structure
+export interface HealthCheckResponse {
+  status: string;
+  model_loaded: boolean;
+  data_loaded: boolean;
+  feature_count: number;
+  timestamp: string;
 }
 
 /**
@@ -55,6 +100,39 @@ async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
 }
 
 /**
+ * Generic API call function for multipart/form-data requests (file uploads)
+ */
+async function apiCallMultipart<T>(endpoint: string, formData: FormData): Promise<T> {
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      let errorMessage = `API call failed with status: ${response.status}`;
+      
+      try {
+        const errorData: ApiError = await response.json();
+        errorMessage = errorData.error || errorMessage;
+      } catch {
+        errorMessage = `${response.status}: ${response.statusText}`;
+      }
+      
+      throw new Error(errorMessage);
+    }
+
+    const result: T = await response.json();
+    return result;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error('Unknown API error occurred');
+  }
+}
+
+/**
  * Sends patient features to the backend API for a breast cancer prediction.
  * @param features An array of numerical features for a patient.
  * @returns A promise that resolves to a PredictionResult object.
@@ -80,14 +158,8 @@ export async function predictWithApi(features: number[]): Promise<PredictionResu
  * Fetches the current model status and statistics.
  * @returns A promise that resolves to model status information.
  */
-export async function getModelStatus(): Promise<{
-  trained: boolean;
-  accuracy: number;
-  total_samples: number;
-  feature_count: number;
-  feature_names?: string[];
-}> {
-  return apiCall('/status');
+export async function getModelStatus(): Promise<ModelStatusResponse> {
+  return apiCall<ModelStatusResponse>('/status');
 }
 
 /**
@@ -96,17 +168,13 @@ export async function getModelStatus(): Promise<{
  * @param limit Optional limit on number of records
  * @returns A promise that resolves to the dataset
  */
-export async function getDataset(diagnosis?: string, limit?: number): Promise<{
-  data: Array<Record<string, any>>;
-  total_count: number;
-  feature_names: string[];
-}> {
+export async function getDataset(diagnosis?: string, limit?: number): Promise<DatasetResponse> {
   const params = new URLSearchParams();
   if (diagnosis) params.append('diagnosis', diagnosis);
   if (limit && limit > 0) params.append('limit', limit.toString());
   
   const endpoint = `/data${params.toString() ? `?${params}` : ''}`;
-  return apiCall(endpoint);
+  return apiCall<DatasetResponse>(endpoint);
 }
 
 /**
@@ -114,28 +182,89 @@ export async function getDataset(diagnosis?: string, limit?: number): Promise<{
  * @param selectedIds Optional array of sample IDs to train on
  * @returns A promise that resolves to retraining results
  */
-export async function retrainModel(selectedIds?: string[]): Promise<{
-  status: string;
-  new_accuracy: number;
-  samples_used: number;
-}> {
-  return apiCall('/train', {
+export async function retrainModel(selectedIds?: string[]): Promise<TrainingResponse> {
+  return apiCall<TrainingResponse>('/train', {
     method: 'POST',
     body: JSON.stringify({ ids: selectedIds || [] }),
   });
 }
 
 /**
+ * Uploads a CSV file for training data.
+ * @param file The CSV file to upload
+ * @returns A promise that resolves to upload result
+ */
+export async function uploadTrainingFile(file: File): Promise<FileUploadResult> {
+  if (!file) {
+    throw new Error('No file provided');
+  }
+
+  if (!file.type.includes('csv') && !file.name.endsWith('.csv')) {
+    throw new Error('File must be a CSV file');
+  }
+
+  const maxSize = 10 * 1024 * 1024; // 10MB
+  if (file.size > maxSize) {
+    throw new Error('File size must be less than 10MB');
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  return apiCallMultipart<FileUploadResult>('/upload', formData);
+}
+
+/**
+ * Gets the list of available uploaded files.
+ * @returns A promise that resolves to list of uploaded files
+ */
+export async function getUploadedFiles(): Promise<{
+  files: Array<{
+    filename: string;
+    upload_time: string;
+    size: number;
+    columns: string[];
+  }>;
+}> {
+  return apiCall('/files');
+}
+
+/**
+ * Deletes an uploaded file.
+ * @param filename The name of the file to delete
+ * @returns A promise that resolves to deletion result
+ */
+export async function deleteUploadedFile(filename: string): Promise<{
+  success: boolean;
+  message: string;
+}> {
+  return apiCall(`/files/${encodeURIComponent(filename)}`, {
+    method: 'DELETE',
+  });
+}
+
+/**
+ * Gets detailed information about an uploaded file including column analysis.
+ * @param filename The name of the file to analyze
+ * @returns A promise that resolves to file analysis
+ */
+export async function analyzeUploadedFile(filename: string): Promise<{
+  filename: string;
+  columns: string[];
+  total_rows: number;
+  sample_data: any[];
+  column_types: Record<string, string>;
+  missing_values: Record<string, number>;
+}> {
+  return apiCall(`/files/${encodeURIComponent(filename)}/analyze`);
+}
+
+/**
  * Performs a health check on the API.
  * @returns A promise that resolves to health status
  */
-export async function healthCheck(): Promise<{
-  status: string;
-  model_loaded: boolean;
-  data_loaded: boolean;
-  feature_count: number;
-}> {
-  return apiCall('/health');
+export async function healthCheck(): Promise<HealthCheckResponse> {
+  return apiCall<HealthCheckResponse>('/health');
 }
 
 /**
@@ -148,5 +277,94 @@ export async function isApiAvailable(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Validates a CSV file on the client side before upload.
+ * @param file The file to validate
+ * @returns A promise that resolves to validation result
+ */
+export async function validateCsvFile(file: File): Promise<{
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  preview?: {
+    headers: string[];
+    rows: string[][];
+    totalRows: number;
+  };
+}> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Basic file validation
+  if (!file.type.includes('csv') && !file.name.endsWith('.csv')) {
+    errors.push('File must be a CSV file');
+  }
+
+  if (file.size > 10 * 1024 * 1024) {
+    errors.push('File size must be less than 10MB');
+  }
+
+  if (file.size === 0) {
+    errors.push('File cannot be empty');
+  }
+
+  // If basic validation fails, return early
+  if (errors.length > 0) {
+    return { valid: false, errors, warnings };
+  }
+
+  try {
+    // Read and parse CSV for preview
+    const text = await file.text();
+    const lines = text.split('\n').filter(line => line.trim());
+    
+    if (lines.length < 2) {
+      errors.push('CSV file must contain at least a header row and one data row');
+      return { valid: false, errors, warnings };
+    }
+
+    const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+    
+    // Check for empty headers
+    const emptyHeaders = headers.filter((h, i) => !h && `Column_${i + 1}`);
+    if (emptyHeaders.length > 0) {
+      warnings.push('Some columns have empty headers');
+    }
+
+    // Check for duplicate headers
+    const duplicateHeaders = headers.filter((h, i) => headers.indexOf(h) !== i);
+    if (duplicateHeaders.length > 0) {
+      warnings.push('Duplicate column headers detected');
+    }
+
+    // Create preview data
+    const previewRows = lines.slice(1, 6).map(line => 
+      line.split(',').map(cell => cell.trim().replace(/"/g, ''))
+    );
+
+    const preview = {
+      headers,
+      rows: previewRows,
+      totalRows: lines.length - 1
+    };
+
+    // Check if 'diagnosis' column exists
+    if (!headers.some(h => h.toLowerCase().includes('diagnosis'))) {
+      warnings.push('No "diagnosis" column found. Make sure your target column is named appropriately.');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      preview
+    };
+
+  } catch (error) {
+    errors.push('Failed to parse CSV file. Please check the file format.');
+    return { valid: false, errors, warnings };
   }
 }

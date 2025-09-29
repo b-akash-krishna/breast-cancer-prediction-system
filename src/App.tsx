@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Brain,
   BarChart2,
@@ -8,12 +8,36 @@ import {
   AlertCircle,
   CheckCircle,
   Loader,
+  UploadCloud,
+  FileText,
+  Trash2,
+  Play,
+  FileQuestion,
+  FileCheck2,
 } from 'lucide-react';
-import { predictWithApi, PredictionResult } from './apiService';
+import {
+  predictWithApi,
+  PredictionResult,
+  getModelStatus,
+  getDataset,
+  retrainModel,
+  uploadTrainingFile,
+  getUploadedFiles,
+  deleteUploadedFile,
+  analyzeUploadedFile,
+  validateCsvFile,
+  FileUploadResult,
+} from './apiService';
 
 // Define the expected structure of a data row from the backend
 interface DataRow {
   [key: string]: number | string | null;
+}
+
+interface DatasetInfo {
+  source: string;
+  filename: string;
+  upload_time?: string;
 }
 
 // Define the expected structure of the model status response
@@ -23,6 +47,7 @@ interface ModelStatus {
   total_samples: number;
   feature_count: number;
   feature_names?: string[];
+  current_dataset?: DatasetInfo;
   error?: string;
 }
 
@@ -31,12 +56,32 @@ interface DataResponse {
   data: DataRow[];
   total_count: number;
   feature_names: string[];
+  current_dataset?: DatasetInfo;
+}
+
+interface UploadedFile {
+  filename: string;
+  upload_time: string;
+  size: number;
+  columns: string[];
+  total_rows: number;
+}
+
+interface FileAnalysis {
+  filename: string;
+  columns: string[];
+  total_rows: number;
+  sample_data: any[];
+  column_types: Record<string, string>;
+  missing_values: Record<string, number>;
 }
 
 // Error Boundary Component
-const ErrorBoundary: React.FC<{ children: React.ReactNode; fallback?: React.ReactNode }> = ({ 
-  children, 
-  fallback = <div className="text-red-500 p-4">Something went wrong. Please refresh the page.</div> 
+const ErrorBoundary: React.FC<{ children: React.ReactNode; fallback?: React.ReactNode }> = ({
+  children,
+  fallback = (
+    <div className="text-red-500 p-4">Something went wrong. Please refresh the page.</div>
+  ),
 }) => {
   const [hasError, setHasError] = useState(false);
 
@@ -54,7 +99,7 @@ const ErrorBoundary: React.FC<{ children: React.ReactNode; fallback?: React.Reac
 };
 
 // Loading Spinner Component
-const LoadingSpinner: React.FC<{ message?: string }> = ({ message = "Loading..." }) => (
+const LoadingSpinner: React.FC<{ message?: string }> = ({ message = 'Loading...' }) => (
   <div className="flex flex-col items-center justify-center p-8">
     <Loader className="w-8 h-8 animate-spin text-indigo-600 mb-2" />
     <p className="text-gray-600 dark:text-gray-400">{message}</p>
@@ -99,16 +144,10 @@ const DashboardTab = () => {
     try {
       setLoading(true);
       setError(null);
-      
-      const response = await fetch('http://127.0.0.1:5000/status');
-      if (!response.ok) {
-        throw new Error(`Failed to fetch model status: ${response.status}`);
-      }
-      
-      const status: ModelStatus = await response.json();
+      const status = await getModelStatus();
       setModelStatus(status);
     } catch (error) {
-      console.error("Failed to fetch dashboard data:", error);
+      console.error('Failed to fetch dashboard data:', error);
       setError(error instanceof Error ? error.message : 'Failed to fetch dashboard data');
     } finally {
       setLoading(false);
@@ -131,6 +170,9 @@ const DashboardTab = () => {
   const totalSamples = modelStatus?.total_samples || 0;
   const featureCount = modelStatus?.feature_count || 0;
   const isModelTrained = modelStatus?.trained || false;
+  const datasetSource = modelStatus?.current_dataset?.source === 'sklearn'
+    ? 'Scikit-Learn (Default)'
+    : modelStatus?.current_dataset?.filename || 'Unknown';
 
   return (
     <div className="space-y-8">
@@ -145,12 +187,14 @@ const DashboardTab = () => {
           <ErrorAlert message="Model is not properly trained. Please check the backend logs." />
         )}
       </div>
-      
+
       <div className="stats-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 flex items-center gap-4">
-          <div className={`w-12 h-12 flex items-center justify-center rounded-full text-white ${
-            isModelTrained ? 'bg-indigo-500' : 'bg-gray-400'
-          }`}>
+          <div
+            className={`w-12 h-12 flex items-center justify-center rounded-full text-white ${
+              isModelTrained ? 'bg-indigo-500' : 'bg-gray-400'
+            }`}
+          >
             <BarChart2 />
           </div>
           <div>
@@ -158,7 +202,7 @@ const DashboardTab = () => {
             <div className="text-sm text-gray-500">Model Accuracy</div>
           </div>
         </div>
-        
+
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 flex items-center gap-4">
           <div className="w-12 h-12 flex items-center justify-center rounded-full bg-green-500 text-white">
             <Activity />
@@ -168,7 +212,7 @@ const DashboardTab = () => {
             <div className="text-sm text-gray-500">Predictions Made</div>
           </div>
         </div>
-        
+
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 flex items-center gap-4">
           <div className="w-12 h-12 flex items-center justify-center rounded-full bg-yellow-500 text-white">
             <Database />
@@ -178,7 +222,7 @@ const DashboardTab = () => {
             <div className="text-sm text-gray-500">Training Samples</div>
           </div>
         </div>
-        
+
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 flex items-center gap-4">
           <div className="w-12 h-12 flex items-center justify-center rounded-full bg-purple-500 text-white">
             <Grid />
@@ -188,6 +232,14 @@ const DashboardTab = () => {
             <div className="text-sm text-gray-500">Features</div>
           </div>
         </div>
+      </div>
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+          Current Dataset
+        </h3>
+        <p className="text-gray-600 dark:text-gray-400">
+          Source: <span className="font-medium text-gray-900 dark:text-white">{datasetSource}</span>
+        </p>
       </div>
 
       {modelStatus?.feature_names && (
@@ -213,27 +265,37 @@ const TrainModelTab = () => {
   const [isRetraining, setIsRetraining] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [loadingStatus, setLoadingStatus] = useState(true);
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  const fetchModelStatus = async () => {
+    try {
+      setLoadingStatus(true);
+      const status = await getModelStatus();
+      setModelStatus(status);
+      setStatusError(null);
+    } catch (error) {
+      setStatusError(error instanceof Error ? error.message : 'Failed to fetch status');
+    } finally {
+      setLoadingStatus(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchModelStatus();
+  }, []);
 
   const handleRetrain = async () => {
     setIsRetraining(true);
     setMessage(null);
     setError(null);
-    
+
     try {
-      const response = await fetch('http://127.0.0.1:5000/train', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Training failed: ${response.status}`);
-      }
-
-      const result = await response.json();
+      const result = await retrainModel();
       setMessage(`${result.status}. New accuracy: ${result.new_accuracy?.toFixed(1)}%`);
+      // Re-fetch model status to update the dashboard
+      fetchModelStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Training failed');
     } finally {
@@ -241,24 +303,37 @@ const TrainModelTab = () => {
     }
   };
 
+  if (loadingStatus) {
+    return <LoadingSpinner message="Loading model status..." />;
+  }
+
+  if (statusError) {
+    return <ErrorAlert message={statusError} onRetry={fetchModelStatus} />;
+  }
+
+  const datasetSource = modelStatus?.current_dataset?.source === 'sklearn'
+    ? 'Scikit-Learn (Default)'
+    : modelStatus?.current_dataset?.filename || 'Unknown';
+  const totalSamples = modelStatus?.total_samples || 0;
+
   return (
     <div className="p-8 bg-white dark:bg-gray-800 rounded-lg shadow-xl">
       <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">
         Model Training
       </h2>
-      
+
       {error && <ErrorAlert message={error} />}
       {message && <SuccessAlert message={message} />}
-      
+
       <div className="space-y-4">
         <p className="text-gray-600 dark:text-gray-400">
-          The model is automatically trained when the Flask backend starts. 
-          You can manually retrain it using the current dataset.
+          The model is currently trained on the dataset from **{datasetSource}** with **{totalSamples}** samples.
+          You can manually retrain it using this dataset at any time.
         </p>
-        
+
         <button
           onClick={handleRetrain}
-          disabled={isRetraining}
+          disabled={isRetraining || !modelStatus?.trained}
           className="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white rounded-lg font-medium transition-colors"
         >
           {isRetraining ? (
@@ -273,6 +348,9 @@ const TrainModelTab = () => {
             </>
           )}
         </button>
+        {!modelStatus?.trained && (
+          <p className="text-sm text-red-500">Cannot retrain: Model has not been trained on a valid dataset yet.</p>
+        )}
       </div>
     </div>
   );
@@ -285,29 +363,31 @@ const DiagnosisTab = () => {
   const [prediction, setPrediction] = useState<PredictionResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadingFeatures, setLoadingFeatures] = useState(true);
 
   // Fetch feature names on component mount
   useEffect(() => {
     const fetchFeatureNames = async () => {
       try {
-        const response = await fetch('http://127.0.0.1:5000/status');
-        if (response.ok) {
-          const status = await response.json();
-          if (status.feature_names) {
-            setFeatureNames(status.feature_names);
-            // Initialize input values
-            const initialValues: Record<string, string> = {};
-            status.feature_names.forEach((name: string) => {
-              initialValues[name] = '';
-            });
-            setInputValues(initialValues);
-          }
+        setLoadingFeatures(true);
+        const status = await getModelStatus();
+        if (status.feature_names) {
+          setFeatureNames(status.feature_names);
+          // Initialize input values
+          const initialValues: Record<string, string> = {};
+          status.feature_names.forEach((name: string) => {
+            initialValues[name] = '';
+          });
+          setInputValues(initialValues);
         }
       } catch (error) {
         console.error('Failed to fetch feature names:', error);
+        setError(error instanceof Error ? error.message : 'Failed to load feature information.');
+      } finally {
+        setLoadingFeatures(false);
       }
     };
-    
+
     fetchFeatureNames();
   }, []);
 
@@ -327,7 +407,7 @@ const DiagnosisTab = () => {
         sampleData[name] = '0';
       }
     });
-    
+
     setInputValues(sampleData);
     setPrediction(null);
     setError(null);
@@ -337,9 +417,9 @@ const DiagnosisTab = () => {
     setIsLoading(true);
     setPrediction(null);
     setError(null);
-    
+
     try {
-      const features = featureNames.map(name => {
+      const features = featureNames.map((name) => {
         const value = parseFloat(inputValues[name] || '0');
         return isNaN(value) ? 0 : value;
       });
@@ -355,24 +435,25 @@ const DiagnosisTab = () => {
     }
   };
 
-  const isFormValid = featureNames.every(name => inputValues[name] !== '');
+  const isFormValid = featureNames.every((name) => inputValues[name] !== '');
 
-  if (featureNames.length === 0) {
+  if (loadingFeatures) {
     return <LoadingSpinner message="Loading feature information..." />;
   }
+  
+  if (error) {
+    return <ErrorAlert message={error} />;
+  }
+  
 
   return (
     <div className="space-y-8">
       <div className="text-center">
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
-          Tumor Diagnosis
-        </h1>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Tumor Diagnosis</h1>
         <p className="mt-2 text-gray-600 dark:text-gray-400">
           Enter patient measurements for AI-assisted diagnosis
         </p>
       </div>
-
-      {error && <ErrorAlert message={error} />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div className="card bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6">
@@ -387,7 +468,7 @@ const DiagnosisTab = () => {
                     htmlFor={name}
                     className="block text-sm font-medium text-gray-700 dark:text-gray-300"
                   >
-                    {name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    {name.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
                   </label>
                   <input
                     type="number"
@@ -461,14 +542,20 @@ const DiagnosisTab = () => {
                 </div>
               </div>
               <div className="text-sm text-gray-600 dark:text-gray-400">
-                <p><strong>Model Accuracy:</strong> {prediction.accuracy.toFixed(1)}%</p>
+                <p>
+                  <strong>Model Accuracy:</strong> {prediction.accuracy.toFixed(1)}%
+                </p>
                 {prediction.prediction_timestamp && (
-                  <p><strong>Prediction Time:</strong> {new Date(prediction.prediction_timestamp).toLocaleString()}</p>
+                  <p>
+                    <strong>Prediction Time:</strong>{' '}
+                    {new Date(prediction.prediction_timestamp).toLocaleString()}
+                  </p>
                 )}
               </div>
               <div className="disclaimer bg-gray-100 dark:bg-gray-700 p-4 rounded-md border-l-4 border-yellow-500 text-sm text-gray-600 dark:text-gray-400">
                 <strong>Medical Disclaimer:</strong> This AI system is for educational purposes only.
-                Always consult with qualified medical professionals for actual diagnosis and treatment.
+                Always consult with qualified medical professionals for actual diagnosis and
+                treatment.
               </div>
             </div>
           </div>
@@ -491,25 +578,14 @@ const DataExplorerTab = () => {
   const fetchData = async () => {
     setIsLoading(true);
     setError(null);
-    
+
     try {
-      const params = new URLSearchParams();
-      if (filter) params.append('diagnosis', filter);
-      if (limit > 0) params.append('limit', limit.toString());
-      
-      const url = `http://127.0.0.1:5000/data?${params}`;
-      const response = await fetch(url);
-      
-      if (!response.ok) {
-        throw new Error(`Failed to fetch data: ${response.status}`);
-      }
-      
-      const result: DataResponse = await response.json();
+      const result = await getDataset(filter || undefined, limit > 0 ? limit : undefined);
       setData(result.data || []);
       setTotalCount(result.total_count || 0);
       setFeatureNames(result.feature_names || []);
     } catch (error) {
-      console.error("Failed to fetch data:", error);
+      console.error('Failed to fetch data:', error);
       setError(error instanceof Error ? error.message : 'Failed to fetch data');
       setData([]);
     } finally {
@@ -532,9 +608,7 @@ const DataExplorerTab = () => {
   return (
     <div className="space-y-8">
       <div className="text-center">
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">
-          Dataset Explorer
-        </h1>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Dataset Explorer</h1>
         <p className="mt-2 text-gray-600 dark:text-gray-400">
           Explore the Breast Cancer Dataset ({totalCount} total samples)
         </p>
@@ -563,9 +637,7 @@ const DataExplorerTab = () => {
               </select>
             </div>
             <div className="flex items-center gap-2">
-              <label className="text-sm text-gray-600 dark:text-gray-400">
-                Show:
-              </label>
+              <label className="text-sm text-gray-600 dark:text-gray-400">Show:</label>
               <select
                 value={limit}
                 onChange={handleLimitChange}
@@ -579,7 +651,7 @@ const DataExplorerTab = () => {
             </div>
           </div>
         </div>
-        
+
         <div className="data-table-container overflow-x-auto max-h-96">
           {isLoading ? (
             <LoadingSpinner message="Loading data..." />
@@ -591,7 +663,10 @@ const DataExplorerTab = () => {
                     Diagnosis
                   </th>
                   {featureNames.slice(0, 4).map((name) => (
-                    <th key={name} className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                    <th
+                      key={name}
+                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider"
+                    >
                       {name.replace(/_/g, ' ')}
                     </th>
                   ))}
@@ -612,13 +687,15 @@ const DataExplorerTab = () => {
                       </span>
                     </td>
                     {featureNames.slice(0, 4).map((name) => (
-                      <td key={name} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
+                      <td
+                        key={name}
+                        className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100"
+                      >
                         {row[name] !== null && row[name] !== undefined
                           ? typeof row[name] === 'number'
                             ? (row[name] as number).toFixed(3)
                             : row[name]
-                          : 'N/A'
-                        }
+                          : 'N/A'}
                       </td>
                     ))}
                   </tr>
@@ -627,7 +704,7 @@ const DataExplorerTab = () => {
             </table>
           )}
         </div>
-        
+
         {data.length === 0 && !isLoading && (
           <div className="text-center py-8 text-gray-500 dark:text-gray-400">
             No data available
@@ -638,15 +715,275 @@ const DataExplorerTab = () => {
   );
 };
 
+// --- File Management Tab Component
+const FileManagementTab = () => {
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadMessage, setUploadMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [analysis, setAnalysis] = useState<FileAnalysis | null>(null);
+  const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+
+  const fetchFiles = async () => {
+    setLoadingFiles(true);
+    setUploadError(null);
+    try {
+      const result = await getUploadedFiles();
+      setUploadedFiles(result.files);
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Failed to fetch files');
+    } finally {
+      setLoadingFiles(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchFiles();
+  }, []);
+
+  const handleFileChange = async (file: File | null) => {
+    if (!file) return;
+
+    setUploading(true);
+    setUploadError(null);
+    setUploadMessage(null);
+
+    // Client-side validation
+    const validation = await validateCsvFile(file);
+    if (!validation.valid) {
+      setUploadError(validation.errors.join('. '));
+      setUploading(false);
+      return;
+    }
+
+    try {
+      const result = await uploadTrainingFile(file);
+      if (result.success) {
+        setUploadMessage(result.message);
+        fetchFiles(); // Refresh the file list
+      } else {
+        setUploadError(result.message);
+      }
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      handleFileChange(file);
+    }
+  };
+
+  const handleDeleteFile = async (filename: string) => {
+    if (window.confirm(`Are you sure you want to delete "${filename}"?`)) {
+      try {
+        await deleteUploadedFile(filename);
+        fetchFiles();
+        if (analysis?.filename === filename) {
+          setAnalysis(null);
+        }
+        setUploadMessage(`File "${filename}" deleted successfully.`);
+      } catch (error) {
+        setUploadError(error instanceof Error ? error.message : 'Failed to delete file');
+      }
+    }
+  };
+
+  const handleAnalyzeFile = async (filename: string) => {
+    setLoadingAnalysis(true);
+    setAnalysis(null);
+    setAnalysisError(null);
+    try {
+      const result = await analyzeUploadedFile(filename);
+      setAnalysis(result);
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : 'Failed to analyze file');
+    } finally {
+      setLoadingAnalysis(false);
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="text-center">
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Dataset Management</h1>
+        <p className="mt-2 text-gray-600 dark:text-gray-400">
+          Upload and manage your custom datasets for model training.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <div className="card bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 space-y-4">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Upload New Dataset</h3>
+          <div
+            className="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center cursor-pointer hover:border-indigo-500 transition-colors"
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <UploadCloud className="w-12 h-12 text-gray-400 mb-2" />
+            <p className="text-gray-500 dark:text-gray-400">
+              Drag & drop a CSV file here, or click to browse
+            </p>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
+              className="hidden"
+              accept=".csv"
+              disabled={uploading}
+            />
+          </div>
+
+          {uploading && <LoadingSpinner message="Uploading and processing file..." />}
+          {uploadError && <ErrorAlert message={uploadError} />}
+          {uploadMessage && <SuccessAlert message={uploadMessage} />}
+
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mt-8">
+            Uploaded Datasets ({uploadedFiles.length})
+          </h3>
+          {loadingFiles ? (
+            <LoadingSpinner message="Fetching files..." />
+          ) : (
+            <ul className="space-y-2 max-h-60 overflow-y-auto">
+              {uploadedFiles.map((file) => (
+                <li
+                  key={file.filename}
+                  className="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{file.filename}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {file.total_rows} rows • {(file.size / 1024 / 1024).toFixed(2)} MB
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 ml-4">
+                    <button
+                      title="Load this dataset"
+                      className="text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors"
+                      // onClick={() => handleLoadFile(file.filename)}
+                      // disabled={isDatasetLoading}
+                    >
+                      <Play className="w-5 h-5" />
+                    </button>
+                    <button
+                      title="Analyze file"
+                      className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100 transition-colors"
+                      onClick={() => handleAnalyzeFile(file.filename)}
+                    >
+                      <FileQuestion className="w-5 h-5" />
+                    </button>
+                    <button
+                      title="Delete file"
+                      className="text-red-500 hover:text-red-700 transition-colors"
+                      onClick={() => handleDeleteFile(file.filename)}
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="card bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 space-y-4">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+            Dataset Analysis
+          </h3>
+          {loadingAnalysis ? (
+            <LoadingSpinner message="Analyzing selected file..." />
+          ) : analysis ? (
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <FileCheck2 className="w-5 h-5 text-green-500" />
+                <p className="text-sm text-gray-900 dark:text-white">
+                  Analysis for: <span className="font-medium">{analysis.filename}</span>
+                </p>
+              </div>
+              <div>
+                <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Summary
+                </h4>
+                <ul className="text-xs text-gray-600 dark:text-gray-400">
+                  <li>Total Rows: {analysis.total_rows}</li>
+                  <li>Total Columns: {analysis.columns.length}</li>
+                </ul>
+              </div>
+              <div className="max-h-60 overflow-y-auto">
+                <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Column Details
+                </h4>
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">
+                        Column
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">
+                        Type
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">
+                        Missing
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    {analysis.columns.map((col) => (
+                      <tr key={col}>
+                        <td className="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                          {col}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400">
+                          {analysis.column_types[col]}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400">
+                          {analysis.missing_values[col]}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : analysisError ? (
+            <ErrorAlert message={analysisError} onRetry={() => {}} />
+          ) : (
+            <div className="text-center text-gray-500 dark:text-gray-400">
+              Select a file to see its analysis.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // --- Main App Component
 function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
-  
+
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: <Grid /> },
     { id: 'train', label: 'Model Training', icon: <Brain /> },
     { id: 'predict', label: 'Diagnosis', icon: <Activity /> },
     { id: 'data', label: 'Data Explorer', icon: <Database /> },
+    { id: 'files', label: 'Data Management', icon: <FileText /> },
   ];
 
   const renderTabContent = () => {
@@ -659,6 +996,8 @@ function App() {
         return <DiagnosisTab />;
       case 'data':
         return <DataExplorerTab />;
+      case 'files':
+        return <FileManagementTab />;
       default:
         return <DashboardTab />;
     }
