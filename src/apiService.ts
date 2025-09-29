@@ -4,6 +4,21 @@ export interface PredictionResult {
   confidence: number;
   accuracy: number;
   prediction_timestamp?: string;
+  probability_benign?: number;
+  probability_malignant?: number;
+}
+
+// Batch prediction result
+export interface BatchPredictionResult {
+  predictions: Array<{
+    row_index: number;
+    diagnosis: string;
+    confidence: number;
+    probability_benign: number;
+    probability_malignant: number;
+  }>;
+  total_predictions: number;
+  timestamp: string;
 }
 
 // Define file upload response structure
@@ -46,6 +61,7 @@ export interface TrainingResponse {
   new_accuracy: number;
   samples_used: number;
   timestamp: string;
+  metrics?: any;
 }
 
 // Define health check response structure
@@ -82,7 +98,6 @@ async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
         const errorData: ApiError = await response.json();
         errorMessage = errorData.error || errorMessage;
       } catch {
-        // If we can't parse the error response, use the status message
         errorMessage = `${response.status}: ${response.statusText}`;
       }
       
@@ -142,7 +157,6 @@ export async function predictWithApi(features: number[]): Promise<PredictionResu
     throw new Error('Features must be a non-empty array of numbers');
   }
 
-  // Validate that all features are numbers
   const invalidFeatures = features.some(f => typeof f !== 'number' || isNaN(f));
   if (invalidFeatures) {
     throw new Error('All features must be valid numbers');
@@ -152,6 +166,38 @@ export async function predictWithApi(features: number[]): Promise<PredictionResu
     method: 'POST',
     body: JSON.stringify({ features }),
   });
+}
+
+/**
+ * Batch predict from CSV file upload (no diagnosis column needed)
+ * @param file CSV file with patient data
+ * @returns Batch prediction results
+ */
+export async function batchPredictFromFile(file: File): Promise<BatchPredictionResult> {
+  if (!file) {
+    throw new Error('No file provided');
+  }
+
+  if (!file.type.includes('csv') && !file.name.endsWith('.csv')) {
+    throw new Error('File must be a CSV file');
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  return apiCallMultipart<BatchPredictionResult>('/predict/batch', formData);
+}
+
+/**
+ * Get a random sample from the current dataset
+ * @returns Random sample data with features
+ */
+export async function getRandomSample(): Promise<{
+  features: number[];
+  diagnosis?: string;
+  feature_names: string[];
+}> {
+  return apiCall('/data/random-sample');
 }
 
 /**
@@ -165,27 +211,27 @@ export async function getModelStatus(): Promise<ModelStatusResponse> {
 /**
  * Fetches dataset with optional filtering.
  * @param diagnosis Optional filter by diagnosis ('M' or 'B')
- * @param limit Optional limit on number of records
+ * @param limit Optional limit on number of records (0 or undefined = all records)
  * @returns A promise that resolves to the dataset
  */
 export async function getDataset(diagnosis?: string, limit?: number): Promise<DatasetResponse> {
   const params = new URLSearchParams();
   if (diagnosis) params.append('diagnosis', diagnosis);
-  if (limit && limit > 0) params.append('limit', limit.toString());
+  if (limit !== undefined && limit !== 0) params.append('limit', limit.toString());
   
   const endpoint = `/data${params.toString() ? `?${params}` : ''}`;
   return apiCall<DatasetResponse>(endpoint);
 }
 
 /**
- * Triggers model retraining.
- * @param selectedIds Optional array of sample IDs to train on
+ * Triggers model retraining using row indices.
+ * @param selectedIndices Optional array of row indices (0-based) to train on
  * @returns A promise that resolves to retraining results
  */
-export async function retrainModel(selectedIds?: string[]): Promise<TrainingResponse> {
+export async function retrainModel(selectedIndices?: number[]): Promise<TrainingResponse> {
   return apiCall<TrainingResponse>('/train', {
     method: 'POST',
-    body: JSON.stringify({ ids: selectedIds || [] }),
+    body: JSON.stringify({ indices: selectedIndices || [] }),
   });
 }
 
@@ -298,7 +344,6 @@ export async function validateCsvFile(file: File): Promise<{
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Basic file validation
   if (!file.type.includes('csv') && !file.name.endsWith('.csv')) {
     errors.push('File must be a CSV file');
   }
@@ -311,13 +356,11 @@ export async function validateCsvFile(file: File): Promise<{
     errors.push('File cannot be empty');
   }
 
-  // If basic validation fails, return early
   if (errors.length > 0) {
     return { valid: false, errors, warnings };
   }
 
   try {
-    // Read and parse CSV for preview
     const text = await file.text();
     const lines = text.split('\n').filter(line => line.trim());
     
@@ -328,19 +371,16 @@ export async function validateCsvFile(file: File): Promise<{
 
     const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
     
-    // Check for empty headers
     const emptyHeaders = headers.filter((h, i) => !h && `Column_${i + 1}`);
     if (emptyHeaders.length > 0) {
       warnings.push('Some columns have empty headers');
     }
 
-    // Check for duplicate headers
     const duplicateHeaders = headers.filter((h, i) => headers.indexOf(h) !== i);
     if (duplicateHeaders.length > 0) {
       warnings.push('Duplicate column headers detected');
     }
 
-    // Create preview data
     const previewRows = lines.slice(1, 6).map(line => 
       line.split(',').map(cell => cell.trim().replace(/"/g, ''))
     );
@@ -350,11 +390,6 @@ export async function validateCsvFile(file: File): Promise<{
       rows: previewRows,
       totalRows: lines.length - 1
     };
-
-    // Check if 'diagnosis' column exists
-    if (!headers.some(h => h.toLowerCase().includes('diagnosis'))) {
-      warnings.push('No "diagnosis" column found. Make sure your target column is named appropriately.');
-    }
 
     return {
       valid: errors.length === 0,

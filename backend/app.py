@@ -3,16 +3,13 @@ import pandas as pd
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
 from sklearn.datasets import load_breast_cancer
-from sklearn.feature_selection import SelectKBest, f_classif
 import logging
 from datetime import datetime
 from werkzeug.utils import secure_filename
-import json
+
+# Import our new training module
+from model_trainer import BreastCancerModelTrainer
 
 # Configure logging
 logging.basicConfig(
@@ -39,14 +36,23 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 
 # Global variables for the model and data
-model = None
-scaler = None
-selector = None
-model_accuracy = 0.0
-feature_names = None
+trainer = BreastCancerModelTrainer(n_features=10, test_size=0.2, random_state=42)
 raw_data = None
 raw_data_for_training = None
 current_dataset_info = {'source': 'sklearn', 'filename': 'default_dataset'}
+
+
+def clean_json_response(obj):
+    """Convert NaN, Infinity to None for valid JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: clean_json_response(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_json_response(item) for item in obj]
+    elif isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj
+    return obj
 
 
 def allowed_file(filename):
@@ -55,14 +61,17 @@ def allowed_file(filename):
 
 
 def load_data(data_path=None):
-    """Loads and preprocesses the dataset. Uses sklearn breast cancer dataset as fallback."""
-    global raw_data, raw_data_for_training, feature_names, current_dataset_info
+    """Loads the dataset. Uses sklearn breast cancer dataset as fallback."""
+    global raw_data, raw_data_for_training, current_dataset_info
 
     if data_path:
         logger.info(f"Loading data from CSV: {data_path}")
         try:
             data = pd.read_csv(data_path)
+            # Replace NaN with None immediately after loading
+            data = data.replace([np.nan, np.inf, -np.inf], None)
             current_dataset_info = {'source': 'file', 'filename': os.path.basename(data_path)}
+            logger.info(f"Loaded CSV with {len(data)} samples and {len(data.columns)} columns")
         except Exception as e:
             logger.error(f"Error loading CSV data from {data_path}: {e}")
             return False
@@ -76,120 +85,38 @@ def load_data(data_path=None):
         logger.info(f"Loaded sklearn dataset with {len(data)} samples and {len(data.columns) - 1} features")
 
     try:
-        # Check for diagnosis column
-        if 'diagnosis' not in data.columns:
-            raise ValueError("Dataset must contain a 'diagnosis' column")
-
-        # Handle potential 'id' column
-        if 'id' in data.columns:
-            # Store the id column for later reference but drop from training features
-            data = data.drop('id', axis=1)
-
-        # Separate diagnosis and features
-        diagnosis_column = data['diagnosis']
-        feature_data = data.drop('diagnosis', axis=1)
-
-        # Convert feature columns to numeric, coercing errors
-        for col in feature_data.columns:
-            feature_data[col] = pd.to_numeric(feature_data[col], errors='coerce')
-
-        # Drop feature columns that are all NaN or have too many missing values
-        feature_data = feature_data.dropna(axis=1, how='all')
-        feature_data = feature_data.dropna(axis=1, thresh=len(feature_data) * 0.5)
-
-        # Fill remaining NaN with the mean of each column
-        numeric_columns = feature_data.select_dtypes(include=[np.number]).columns
-        feature_data[numeric_columns] = feature_data[numeric_columns].fillna(feature_data[numeric_columns].mean())
-
-        # Combine features and diagnosis back for storage
-        processed_data = feature_data.copy()
-        processed_data['diagnosis'] = diagnosis_column
-        raw_data = processed_data.replace({np.nan: None})
-        raw_data_for_training = processed_data
+        # Store both raw and training versions
+        raw_data = data.copy()
+        raw_data_for_training = data.copy()
         
-        feature_names = raw_data_for_training.drop('diagnosis', axis=1).columns.tolist()
-
-        logger.info(f"Data loading complete: {len(raw_data_for_training)} samples, {len(feature_names)} features")
+        logger.info(f"Data loading complete: {len(data)} samples")
         return True
 
     except Exception as e:
-        logger.error(f"Error loading and processing data: {e}")
+        logger.error(f"Error storing data: {e}")
         raw_data = None
         raw_data_for_training = None
-        feature_names = None
         return False
 
 
-def select_features(X, y, k=15):
-    """Selects the top k features using f_classif."""
-    global selector
-
-    if k >= X.shape[1]:
-        logger.warning(f"Number of features to select ({k}) is greater than or equal to total features ({X.shape[1]}). Skipping feature selection.")
-        selector = None
-        return X, X.columns.tolist()
-
-    selector = SelectKBest(f_classif, k=k)
-    X_new = selector.fit_transform(X, y)
-    mask = selector.get_support()
-    selected_features = X.columns[mask].tolist()
-    
-    logger.info(f"Selected {len(selected_features)} features.")
-    return pd.DataFrame(X_new, columns=selected_features), selected_features
-
-
 def train_model(data_for_training=None):
-    """Trains or re-trains the model on a given dataset."""
-    global model, scaler, model_accuracy, feature_names, selector
+    """Trains or re-trains the model using the new BreastCancerModelTrainer."""
+    global trainer
 
     if data_for_training is None:
         if raw_data_for_training is not None:
             data_for_training = raw_data_for_training.copy()
         else:
             logger.error("No data available for training.")
-            model = None
-            scaler = None
-            selector = None
             return False
 
     try:
-        data_for_training = data_for_training.copy()
-        data_for_training['diagnosis'] = data_for_training['diagnosis'].map({'M': 1, 'B': 0})
-        data_for_training = data_for_training.dropna(subset=['diagnosis'])
-
-        X = data_for_training.drop('diagnosis', axis=1)
-        y = data_for_training['diagnosis']
-
-        if len(X) == 0:
-            raise ValueError("No valid training samples after preprocessing")
-
-        # Feature Selection
-        X_selected, selected_features = select_features(X, y, k=15)
-        feature_names = selected_features
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_selected, y, test_size=0.2, random_state=42, stratify=y
-        )
-
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        model = LogisticRegression(solver='liblinear', random_state=42, max_iter=1000)
-        model.fit(X_train_scaled, y_train)
-
-        y_pred = model.predict(X_test_scaled)
-        model_accuracy = accuracy_score(y_test, y_pred)
-
-        logger.info(f"Model training complete. Accuracy: {model_accuracy:.4f}")
-        return True
+        # Use the new trainer
+        success = trainer.train(data_for_training)
+        return success
 
     except Exception as e:
-        logger.error(f"Error during model training: {e}")
-        model = None
-        scaler = None
-        selector = None
-        feature_names = None
+        logger.error(f"Error during model training: {e}", exc_info=True)
         return False
 
 
@@ -207,9 +134,9 @@ def health_check():
     """Health check endpoint for monitoring."""
     return jsonify({
         'status': 'healthy',
-        'model_loaded': model is not None,
+        'model_loaded': trainer.model is not None,
         'data_loaded': raw_data is not None,
-        'feature_count': len(feature_names) if feature_names else 0,
+        'feature_count': len(trainer.selected_feature_names),
         'timestamp': datetime.utcnow().isoformat()
     })
 
@@ -217,13 +144,12 @@ def health_check():
 @app.route('/predict', methods=['POST'])
 def predict():
     """API endpoint to make predictions on new data."""
-    if model is None or scaler is None or feature_names is None:
+    if trainer.model is None or trainer.scaler is None:
         return jsonify({
             'error': 'Model is not trained or loaded properly',
             'details': {
-                'model_loaded': model is not None,
-                'scaler_loaded': scaler is not None,
-                'features_loaded': feature_names is not None
+                'model_loaded': trainer.model is not None,
+                'scaler_loaded': trainer.scaler is not None,
             }
         }), 503
 
@@ -238,37 +164,23 @@ def predict():
         if not isinstance(input_features, list):
             return jsonify({'error': 'Features must be a list'}), 400
 
-        # Create a DataFrame with the correct column names for prediction
-        # Ensure the input features are in the same order as the trained features
-        if len(input_features) != len(feature_names):
-            return jsonify({
-                'error': f'Expected {len(feature_names)} features, but got {len(input_features)}. '
-                         f'Please provide values for the following features: {", ".join(feature_names)}'
-            }), 400
+        # Use the trainer's predict method
+        result = trainer.predict(input_features)
+        
+        # Add model accuracy to response
+        result['accuracy'] = float(trainer.metrics.get('test_accuracy', 0) * 100)
+        result['prediction_timestamp'] = datetime.utcnow().isoformat()
+        
+        logger.info(f"Prediction made: {result['diagnosis']} with {result['confidence']:.1f}% confidence")
 
-        features_df = pd.DataFrame([input_features], columns=feature_names)
+        return jsonify(clean_json_response(result))
 
-        # Scale features
-        features_scaled = scaler.transform(features_df)
-
-        # Make prediction
-        prediction = model.predict(features_scaled)
-        probabilities = model.predict_proba(features_scaled)
-
-        diagnosis = 'Malignant' if prediction[0] == 1 else 'Benign'
-        confidence = float(np.max(probabilities)) * 100
-        logger.info(f"Prediction made: {diagnosis} with {confidence:.1f}% confidence")
-
-        return jsonify({
-            'diagnosis': diagnosis,
-            'confidence': confidence,
-            'accuracy': float(model_accuracy * 100),
-            'prediction_timestamp': datetime.utcnow().isoformat()
-        })
-
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
+    except ValueError as e:
+        logger.error(f"Prediction validation error: {e}")
         return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Prediction error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/data', methods=['GET'])
@@ -285,26 +197,144 @@ def get_data():
         if diagnosis_filter and diagnosis_filter in ['M', 'B']:
             data = data[data['diagnosis'] == diagnosis_filter]
 
+        # Only apply limit if it's positive (0 or None = all data)
         if limit and limit > 0:
             data = data.head(limit)
+
+        # Replace NaN values before converting to dict
+        data = data.replace([np.nan, np.inf, -np.inf], None)
 
         return jsonify({
             'data': data.to_dict('records'),
             'total_count': len(raw_data),
-            'feature_names': feature_names,
+            'feature_names': trainer.selected_feature_names,
             'timestamp': datetime.utcnow().isoformat()
         })
 
     except Exception as e:
-        logger.error(f"Data retrieval error: {e}")
+        logger.error(f"Data retrieval error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/data/random-sample', methods=['GET'])
+def get_random_sample():
+    """API endpoint to get a random sample from the dataset."""
+    if raw_data is None or len(raw_data) == 0:
+        return jsonify({'error': 'No data available'}), 503
+    
+    try:
+        # Get a random row
+        random_row = raw_data.sample(n=1).iloc[0]
+        
+        # Extract features for the selected feature names
+        features = []
+        for feature_name in trainer.selected_feature_names:
+            if feature_name in random_row:
+                value = random_row[feature_name]
+                # Convert to float, handle NaN
+                if pd.isna(value):
+                    features.append(0.0)
+                else:
+                    features.append(float(value))
+            else:
+                features.append(0.0)
+        
+        # Get diagnosis if available
+        diagnosis = random_row.get('diagnosis', None)
+        
+        return jsonify({
+            'features': features,
+            'diagnosis': diagnosis,
+            'feature_names': trainer.selected_feature_names
+        })
+    
+    except Exception as e:
+        logger.error(f"Random sample error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/predict/batch', methods=['POST'])
+def batch_predict():
+    """API endpoint for batch predictions from CSV upload."""
+    if trainer.model is None or trainer.scaler is None:
+        return jsonify({'error': 'Model not trained'}), 503
+    
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'Only CSV files allowed'}), 400
+    
+    try:
+        # Read CSV
+        data = pd.read_csv(file)
+        logger.info(f"Batch prediction: loaded {len(data)} rows, {len(data.columns)} columns")
+        
+        # Extract only the features needed for prediction
+        missing_features = []
+        features_data = []
+        
+        for feature_name in trainer.selected_feature_names:
+            if feature_name not in data.columns:
+                missing_features.append(feature_name)
+                # Use zeros for missing features
+                features_data.append(np.zeros(len(data)))
+            else:
+                # Convert to numeric, fill NaN with 0
+                col_data = pd.to_numeric(data[feature_name], errors='coerce').fillna(0).values
+                features_data.append(col_data)
+        
+        if missing_features:
+            logger.warning(f"Missing features in uploaded file: {missing_features}. Using zeros.")
+        
+        # Transpose to get (n_samples, n_features)
+        features_array = np.array(features_data).T
+        
+        # Make predictions
+        predictions = []
+        for idx, features in enumerate(features_array):
+            try:
+                result = trainer.predict(features.tolist())
+                predictions.append({
+                    'row_index': idx,
+                    'diagnosis': result['diagnosis'],
+                    'confidence': result['confidence'],
+                    'probability_benign': result['probability_benign'],
+                    'probability_malignant': result['probability_malignant']
+                })
+            except Exception as e:
+                logger.error(f"Prediction failed for row {idx}: {e}")
+                predictions.append({
+                    'row_index': idx,
+                    'diagnosis': 'Error',
+                    'confidence': 0,
+                    'probability_benign': 0,
+                    'probability_malignant': 0,
+                    'error': str(e)
+                })
+        
+        return jsonify({
+            'predictions': predictions,
+            'total_predictions': len(predictions),
+            'missing_features': missing_features,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    
+    except Exception as e:
+        logger.error(f"Batch prediction error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/status', methods=['GET'])
 def get_status():
-    """API endpoint to provide model status and statistics."""
+    """API endpoint to provide model status and comprehensive statistics."""
     try:
-        if model is None or scaler is None:
+        if trainer.model is None:
             return jsonify({
                 'trained': False,
                 'accuracy': 0,
@@ -316,18 +346,19 @@ def get_status():
 
         total_samples = len(raw_data) if raw_data is not None else 0
 
-        return jsonify({
-            'trained': True,
-            'accuracy': float(model_accuracy * 100),
-            'total_samples': total_samples,
-            'feature_count': len(feature_names) if feature_names else 0,
-            'feature_names': feature_names,
-            'current_dataset': current_dataset_info,
-            'timestamp': datetime.utcnow().isoformat()
-        })
+        # Get comprehensive model summary from trainer
+        summary = trainer.get_model_summary()
+        
+        # Add additional context
+        summary['accuracy'] = float(trainer.metrics.get('test_accuracy', 0) * 100)
+        summary['total_samples'] = total_samples
+        summary['current_dataset'] = current_dataset_info
+        summary['timestamp'] = datetime.utcnow().isoformat()
+
+        return jsonify(clean_json_response(summary))
 
     except Exception as e:
-        logger.error(f"Status check error: {e}")
+        logger.error(f"Status check error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 
@@ -339,23 +370,47 @@ def retrain_model():
 
     try:
         request_data = request.get_json(force=True) if request.is_json else {}
-        selected_ids = request_data.get('ids', [])
+        selected_indices = request_data.get('indices', [])
 
         data_to_train = raw_data_for_training.copy()
 
-        if selected_ids and 'id' in data_to_train.columns:
-            data_to_train = data_to_train[data_to_train['id'].isin(selected_ids)]
+        # Filter by row indices if provided
+        if selected_indices and len(selected_indices) > 0:
+            try:
+                # Convert string indices to integers
+                indices = [int(idx) for idx in selected_indices]
+                # Filter by iloc position
+                data_to_train = data_to_train.iloc[indices]
+                logger.info(f"Training on {len(data_to_train)} selected samples (indices: {len(indices)}) out of {len(raw_data_for_training)}")
+            except (ValueError, IndexError) as e:
+                logger.error(f"Invalid indices provided: {e}")
+                return jsonify({
+                    'status': 'Model retraining failed',
+                    'error': f'Invalid sample indices provided'
+                }), 400
+        else:
+            # Train on ALL data if no selection
+            logger.info(f"Training on all {len(data_to_train)} samples")
+
+        if len(data_to_train) < 10:
+            return jsonify({
+                'status': 'Model retraining failed',
+                'error': f'Insufficient samples for training. Need at least 10, got {len(data_to_train)}. Available in dataset: {len(raw_data_for_training)}'
+            }), 400
 
         success = train_model(data_to_train)
 
         if success:
-            return jsonify({
+            return jsonify(clean_json_response({
                 'status': 'Model retraining completed successfully',
-                'new_accuracy': float(model_accuracy * 100),
+                'new_accuracy': float(trainer.metrics.get('test_accuracy', 0) * 100),
                 'samples_used': len(data_to_train),
+                'metrics': trainer.metrics,
+                'feature_importance': trainer.get_feature_importance_data(),
+                'confusion_matrix': trainer.get_confusion_matrix_data(),
                 'current_dataset': current_dataset_info,
                 'timestamp': datetime.utcnow().isoformat()
-            })
+            }))
         else:
             return jsonify({
                 'status': 'Model retraining failed',
@@ -363,8 +418,8 @@ def retrain_model():
             }), 500
 
     except Exception as e:
-        logger.error(f"Retraining error: {e}")
-        return jsonify({'error': str(e)}), 400
+        logger.error(f"Retraining error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/upload', methods=['POST'])
@@ -372,31 +427,48 @@ def upload_file():
     """API endpoint to upload a new dataset and retrain the model."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file part in the request'}), 400
+    
     file = request.files['file']
+    
     if file.filename == '':
         return jsonify({'error': 'No file selected for uploading'}), 400
+    
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
         try:
             file.save(filepath)
             logger.info(f"File saved successfully at {filepath}")
+            
             success = load_data(data_path=filepath)
+            
             if success:
-                train_model()
-                return jsonify({
-                    'success': True,
-                    'message': 'File uploaded and model retrained successfully',
-                    'filename': filename,
-                    'columns': feature_names
-                }), 200
+                train_success = train_model()
+                
+                if train_success:
+                    return jsonify(clean_json_response({
+                        'success': True,
+                        'message': 'File uploaded and model retrained successfully',
+                        'filename': filename,
+                        'columns': trainer.selected_feature_names,
+                        'metrics': trainer.metrics,
+                        'feature_importance': trainer.get_feature_importance_data(),
+                    })), 200
+                else:
+                    return jsonify({
+                        'success': False,
+                        'message': 'File uploaded but model training failed',
+                        'error': 'Check logs for details'
+                    }), 500
             else:
                 return jsonify({
                     'success': False,
                     'message': 'Failed to process the uploaded file'
                 }), 500
+                
         except Exception as e:
-            logger.error(f"File upload or processing error: {e}")
+            logger.error(f"File upload or processing error: {e}", exc_info=True)
             return jsonify({'success': False, 'message': str(e)}), 500
     else:
         return jsonify({'error': 'Allowed file types are csv'}), 400
@@ -446,10 +518,13 @@ def analyze_file(filename):
     try:
         data = pd.read_csv(filepath)
         
+        # Replace NaN before analysis
+        data_clean = data.replace([np.nan, np.inf, -np.inf], None)
+        
         # Data profiling
         column_types = {col: str(data[col].dtype) for col in data.columns}
-        missing_values = {col: data[col].isnull().sum() for col in data.columns}
-        sample_data = data.head(5).to_dict('records')
+        missing_values = {col: int(data[col].isnull().sum()) for col in data.columns}
+        sample_data = data_clean.head(5).to_dict('records')
         total_rows = len(data)
         columns = data.columns.tolist()
 
@@ -463,7 +538,7 @@ def analyze_file(filename):
         }), 200
 
     except Exception as e:
-        logger.error(f"File analysis error: {e}")
+        logger.error(f"File analysis error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 
@@ -474,6 +549,7 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    logger.error(f"Internal server error: {error}", exc_info=True)
     return jsonify({'error': 'Internal server error'}), 500
 
 
